@@ -5,46 +5,27 @@
 #include <vector>
 #include <stack>
 #include <memory>
+#include "buffer.h"
 
 std::condition_variable cLock;
-std::mutex lock;
+std::mutex mutex;
+Buffer *buffer = new Buffer();
 
-class Buffer {
-    public:
-        int capacity;
-        std::stack<int> buffer;
-
-        Buffer() {}
-        Buffer(int c): capacity(c) {}
-        ~Buffer() {} 
-
-        void produce(int n) {
-            this->buffer.push(n);
-        }
-
-        int consume() {
-            int top = this->buffer.top();
-            this->buffer.pop();
-            return top;
-        }
-
-        void setCapacity(int c) {
-            this->capacity = c; 
-        }
-};
 
 class Producer {
     public:
         int id, amount;
 
         Producer(int i, int m): id(i), amount(m) {}
-        Producer(Producer&& other) noexcept : id(std::move(other.id)), amount(other.id) {
-            other.id = 0;
-        }
+        ~Producer() {}
 
-        void operator()(Buffer& b) {
+        void operator()() {
             for (int i = 0; i < this->amount; i++) {
-                b.produce(1);
+                std::unique_lock<std::mutex> uLock(mutex);
+                cLock.wait(uLock, [] { return buffer->buffer.size() < buffer->capacity; });
+                buffer->produce(this->id, i);
+                uLock.unlock();
+                cLock.notify_all();
             }
         }
 };
@@ -56,8 +37,15 @@ class Consumer {
         Consumer(int i): id(i) {}
         ~Consumer() {}
 
-        void operator()(Buffer &b) {
-            int v = b.consume();
+        void operator()(int totalConsumption) {
+            while(true) {
+                if (buffer->consumedControl >= totalConsumption) delete this;
+                std::unique_lock<std::mutex> uLock(mutex);
+                cLock.wait(uLock, [] { return !buffer->buffer.empty(); });
+                buffer->consume(this->id);
+                uLock.unlock();
+                cLock.notify_all();
+            }
         }
 };
 
@@ -76,17 +64,16 @@ int main() {
     printf("Dile the buffer size: ");
     scanf("%i", &bufferSize);
 
-    Buffer buffer;
-    buffer.setCapacity(bufferSize);
+    buffer->setCapacity(bufferSize);
     std::thread producers[nProducers];
     std::thread consumers[nConsumers];
 
     for (int i = 0; i < nProducers; i++) {
-        producers[i] = std::thread(Producer(i, aProducers), std::ref(buffer));
+        producers[i] = std::thread(Producer(i, aProducers));
     }
-    //for (int i = 0; i < nConsumers; i++) {
-    //    consumers[i] = std::thread(Consumer(i), buffer);
-    //}
+    for (int i = 0; i < nConsumers; i++) {
+        consumers[i] = std::thread(Consumer(i), nProducers*aProducers);
+    }
 
     for (int i = 0; i < nProducers; i++) {
         producers[i].join();
